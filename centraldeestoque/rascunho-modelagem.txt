@@ -1,0 +1,56 @@
+Tabelas de apoio (cadastros)
+categorias
+
+coluna	tipo	regras
+id	uuid PK	default gen_random_uuid()
+nome	text	NOT NULL, UNIQUE
+descricao	text	
+ativo	boolean	NOT NULL default true
+created_at / updated_at	timestamptz	default now()
+unidades (unidade de medida) | id | uuid PK | | nome | text NOT NULL UNIQUE (ex.: "Rolo") | | sigla | text NOT NULL UNIQUE (ex.: "rolo") | | ativo | boolean default true | | created_at/updated_at | timestamptz |
+
+fornecedores | id | uuid PK | | nome | text NOT NULL | | cnpj | text UNIQUE (nullable) | | ativo | boolean default true | | created_at/updated_at |
+
+setores | id | uuid PK | | nome | text NOT NULL UNIQUE | | sigla | text NOT NULL UNIQUE | | ativo | boolean default true | | created_at/updated_at |
+
+Núcleo
+materiais | id | uuid PK | | codigo | text NOT NULL UNIQUE (MAT-001) | | nome | text NOT NULL | | categoria_id | uuid FK → categorias(id) ON DELETE RESTRICT | | unidade_id | uuid FK → unidades(id) ON DELETE RESTRICT | | estoque_central | numeric(14,3) NOT NULL default 0, CHECK (>= 0) | | estoque_minimo | numeric(14,3) NOT NULL default 0, CHECK (>= 0) | | ativo | boolean default true | | created_at/updated_at |
+
+Status ("Disponível / Estoque baixo / Sem estoque") é derivado (view ou generated column), não coluna editável.
+
+posses — saldo atual por setor (o que está "Distribuído aos Setores") | id | uuid PK | | material_id | uuid FK → materiais | | setor_id | uuid FK → setores | | quantidade | numeric(14,3) NOT NULL default 0, CHECK (>= 0) | | ultima_saida | timestamptz | | UNIQUE (material_id, setor_id) |
+
+Tabela de saldo agregado; sempre atualizada pela mesma transação que grava a movimentação.
+
+movimentacoes — histórico imutável (append-only) | id | uuid PK | | data | timestamptz NOT NULL default now() | | material_id | uuid FK → materiais NOT NULL | | tipo | enum tipo_movimentacao ('entrada','saida','devolucao') NOT NULL | | quantidade | numeric(14,3) NOT NULL CHECK (> 0) | | setor_id | uuid FK → setores (NULL apenas para entrada) | | responsavel_id | uuid FK → auth.users | | responsavel_nome | text NOT NULL (snapshot histórico) | | pedido_id | uuid FK → pedidos (opcional, só em entrada) | | observacao | text | | created_at | timestamptz |
+
+Constraints:
+
+CHECK (tipo = 'entrada' OR setor_id IS NOT NULL) — saída e devolução exigem setor.
+CHECK (tipo <> 'entrada' OR setor_id IS NULL)
+Sem UPDATE/DELETE via RLS (histórico permanente).
+Compras
+pedidos | id | uuid PK | | numero | text NOT NULL UNIQUE | | data | date NOT NULL | | fornecedor_id | uuid FK → fornecedores | | solicitante_id | uuid FK → auth.users | | solicitante_nome | text | | situacao | enum situacao_pedido ('em_aprovacao','aprovado','recebido','parcialmente_recebido','cancelado') default 'em_aprovacao' | | created_at/updated_at |
+
+pedido_itens | id | uuid PK | | pedido_id | uuid FK → pedidos ON DELETE CASCADE | | material_id | uuid FK → materiais | | quantidade | numeric(14,3) NOT NULL CHECK (> 0) | | valor_unitario | numeric(14,2) NOT NULL CHECK (>= 0) | | quantidade_recebida | numeric(14,3) NOT NULL default 0, CHECK (>= 0 AND <= quantidade) | | UNIQUE (pedido_id, material_id) |
+
+Pedido nunca altera estoque; só a entrada registrada altera.
+
+gastos — gerado no recebimento | id | uuid PK | | data | date NOT NULL | | material_id | uuid FK → materiais | | pedido_id | uuid FK → pedidos | | movimentacao_id | uuid FK → movimentacoes (rastreio) | | quantidade | numeric(14,3) NOT NULL | | valor_total | numeric(14,2) NOT NULL |
+
+Usuários e permissões
+profiles: id (uuid PK = auth.users.id), nome, cargo, created_at. user_roles: id, user_id FK → auth.users, role enum app_role ('admin','almoxarife','leitor'), UNIQUE(user_id, role) — nunca em profiles; leitura via função has_role() security definer.
+
+Regras que devem viver no banco, não só na UI
+Três funções (registrar_entrada, registrar_saida, registrar_devolucao) em plpgsql, SECURITY DEFINER, transacionais:
+
+Entrada: estoque_central += qtd; se vinculada a pedido, incrementa quantidade_recebida e recalcula situação (parcialmente_recebido / recebido); insere gasto.
+Saída: valida quantidade <= estoque_central (senão exceção), decrementa central, faz upsert em posses somando, atualiza ultima_saida.
+Devolução: valida quantidade <= posses.quantidade do setor, decrementa posse, incrementa central.
+Os CHECK (>= 0) em estoque_central e posses.quantidade são a rede de segurança final contra saldo negativo.
+
+Índices sugeridos: movimentacoes(material_id, data desc), movimentacoes(setor_id), movimentacoes(tipo, data desc), posses(setor_id), pedido_itens(pedido_id), gastos(data desc).
+
+Cada CREATE TABLE no schema public precisa de GRANT explícito (authenticated, service_role) além do RLS.
+
+Quer que eu já ative o Lovable Cloud e implemente essa modelagem com as migrations, funções e RLS?
